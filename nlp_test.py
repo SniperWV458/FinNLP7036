@@ -5,18 +5,7 @@ import torch
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-"""Smoke-test ProsusAI/finbert on zeroshot/twitter-financial-news-sentiment.
-
-Dataset label convention (per dataset card):
-  0 = Bearish
-  1 = Bullish
-  2 = Neutral
-
-FinBERT convention (per model card):
-  3-way sentiment: positive / negative / neutral
-
-We DO NOT assume the logits index order; we read model.config.id2label.
-"""
+from tqdm.auto import tqdm
 
 MODEL_NAME = "ProsusAI/finbert"
 DATASET_NAME = "zeroshot/twitter-financial-news-sentiment"
@@ -38,7 +27,18 @@ def _pick_column(columns: list[str], candidates: tuple[str, ...]) -> str:
     raise KeyError(f"Could not find any of {candidates} in dataset columns={columns}")
 
 
-def main(sample_n: int = 2000, batch_size: int = 32, max_length: int = 128, device: str | None = None) -> None:
+def _batch_indices(idxs: list[int], bs: int):
+    for i in range(0, len(idxs), bs):
+        yield idxs[i : i + bs]
+
+
+def main(
+    sample_n: int = 2000,
+    batch_size: int = 32,
+    max_length: int = 128,
+    device: str | None = None,
+    show_progress: bool = True,
+) -> None:
     ds = load_dataset(DATASET_NAME)
     split = "test" if "test" in ds else "validation" if "validation" in ds else "train"
     data = ds[split]
@@ -55,7 +55,11 @@ def main(sample_n: int = 2000, batch_size: int = 32, max_length: int = 128, devi
     model.eval()
 
     # Inspect model output convention from config
-    id2label = {int(k): v for k, v in model.config.id2label.items()} if isinstance(model.config.id2label, dict) else dict(model.config.id2label)
+    id2label = (
+        {int(k): v for k, v in model.config.id2label.items()}
+        if isinstance(model.config.id2label, dict)
+        else dict(model.config.id2label)
+    )
     label2id = {v: int(k) for k, v in id2label.items()}
     print("FinBERT id2label:", id2label)
     print("FinBERT label2id:", label2id)
@@ -68,18 +72,20 @@ def main(sample_n: int = 2000, batch_size: int = 32, max_length: int = 128, devi
             raise ValueError(f"FinBERT config missing '{need}'. Found labels={set(normalized.values())}")
 
     n = min(sample_n, len(data))
-    idx = np.random.RandomState(42).choice(len(data), size=n, replace=False)
+    rng = np.random.RandomState(42)
+    idx = rng.choice(len(data), size=n, replace=False).astype(int).tolist()
 
-    y_true = []
-    y_pred = []
+    y_true: list[str] = []
+    y_pred: list[str] = []
 
-    def batches(arr, bs):
-        for i in range(0, len(arr), bs):
-            yield arr[i : i + bs]
+    iterator = _batch_indices(idx, batch_size)
+    if show_progress and tqdm is not None:
+        total_batches = (len(idx) + batch_size - 1) // batch_size
+        iterator = tqdm(iterator, total=total_batches, desc="Predicting", unit="batch")
 
-    for b in batches(idx, batch_size):
-        texts = [data[int(i)][text_col] for i in b]
-        labels = [int(data[int(i)][label_col]) for i in b]
+    for b in iterator:
+        texts = [data[i][text_col] for i in b]
+        labels = [int(data[i][label_col]) for i in b]
 
         enc = tokenizer(
             texts,
@@ -113,25 +119,24 @@ def main(sample_n: int = 2000, batch_size: int = 32, max_length: int = 128, devi
     acc = sum(t == p for t, p in zip(y_true, y_pred)) / len(y_true)
     print(f"\nSplit={split}  n={len(y_true)}  accuracy={acc:.4f}")
     print("Confusion matrix (rows=true, cols=pred):")
-    header = "true\\pred\t" + "\t".join(classes)
-    print(header)
+    print("true\\pred\t" + "\t".join(classes))
     for t in classes:
-        row = [str(cm[t][p]) for p in classes]
-        print(t + "\t" + "\t".join(row))
+        print(t + "\t" + "\t".join(str(cm[t][p]) for p in classes))
 
     # Show a few examples
     print("\nExamples:")
-    for i in range(5):
+    for k in range(5):
         print("-" * 80)
-        # pick from the sampled set
-        j = int(idx[i])
+        j = idx[k]
         text = data[j][text_col]
         true_lab = DS_ID2LABEL[int(data[j][label_col])]
-        pred_lab = y_pred[i]
+        pred_lab = y_pred[k]
         print(f"text: {text}")
         print(f"true: {true_lab}  pred: {pred_lab}")
+
+    print("\nDONE: reached end of main()")
 
 
 if __name__ == "__main__":
     # Adjust sample_n upward for a more stable estimate.
-    main(sample_n=2000, batch_size=32, max_length=128)
+    main(sample_n=2000, batch_size=32, max_length=128, show_progress=True)
