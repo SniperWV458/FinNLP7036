@@ -33,7 +33,6 @@ def delete_all_except(directory: str):
             logging.error(f"Failed to delete {file_path}. Reason: {e}")
 
 current_directory = os.getcwd()
-current_directory
 delete_all_except(current_directory)
 
 """# DATA COLLECTION
