@@ -481,6 +481,107 @@ class MarketDataStore:
         print(f"[run] Wrote wide={wide_out_path}, normalized={normalized_out_path}, log={log_out_path}")
         return summary
 
+    def simulate_equal_weight_portfolio_from_wide_parquet_to_csv(
+        self,
+        wide_parquet_path: str,
+        output_csv_path: str,
+        initial_value: float = 1.0,
+    ) -> pd.DataFrame:
+        """
+        Equal-weight buy-and-hold portfolio on a WIDE price matrix parquet:
+          columns: ['date', <ticker1>, <ticker2>, ...]
+        Output CSV columns:
+          ['date', 'portfolio_value', 'log_evolution']
+
+        Reads parquet via DuckDB if enabled; writes CSV via pandas.
+        Returns the output dataframe.
+        """
+        if not os.path.exists(wide_parquet_path):
+            raise FileNotFoundError(f"Input parquet not found: {wide_parquet_path}")
+
+        # --- Read (DuckDB preferred) ---
+        if self.use_duckdb and self._con is not None:
+            df = self._con.execute("SELECT * FROM read_parquet(?)", [wide_parquet_path]).fetchdf()
+        else:
+            df = pd.read_parquet(wide_parquet_path)
+
+        if df.empty:
+            raise ValueError("Input parquet is empty.")
+
+        df = self._normalize_date_column(df)
+        df = (
+            df.sort_values("date")
+              .drop_duplicates(subset=["date"], keep="last")
+              .reset_index(drop=True)
+        )
+
+        if "date" not in df.columns:
+            raise ValueError("Expected a 'date' column.")
+
+        # Identify ticker columns (numeric, excluding date)
+        tickers = [c for c in df.columns if c != "date" and pd.api.types.is_numeric_dtype(df[c])]
+        if not tickers:
+            raise ValueError("No numeric ticker columns found.")
+
+        prices = df[tickers].copy()
+
+        # Drop columns with all NaNs
+        all_nan_cols = prices.columns[prices.isna().all()].tolist()
+        if all_nan_cols:
+            print(f"[portfolio] Dropping all-NaN tickers (n={len(all_nan_cols)}): {all_nan_cols[:10]}{'...' if len(all_nan_cols)>10 else ''}")
+            prices = prices.drop(columns=all_nan_cols)
+
+        if prices.shape[1] == 0:
+            raise ValueError("No valid ticker data after dropping all-NaN columns.")
+
+        # First valid price per ticker
+        first_valid_prices = prices.apply(lambda s: s.dropna().iloc[0] if s.dropna().size > 0 else np.nan)
+
+        # Drop tickers with no valid prices
+        no_valid = first_valid_prices.index[first_valid_prices.isna()].tolist()
+        if no_valid:
+            print(f"[portfolio] Dropping tickers with no valid prices (n={len(no_valid)}): {no_valid[:10]}{'...' if len(no_valid)>10 else ''}")
+            prices = prices.drop(columns=no_valid)
+            first_valid_prices = first_valid_prices.drop(index=no_valid)
+
+        n_tickers = int(prices.shape[1])
+        if n_tickers == 0:
+            raise ValueError("No valid tickers remain after filtering.")
+
+        # Equal-weight allocation
+        initial_value = float(initial_value)
+        weight = 1.0 / n_tickers
+        initial_allocation = initial_value * weight
+
+        # Shares per ticker
+        shares = initial_allocation / first_valid_prices  # Series indexed by ticker
+
+        # Portfolio value over time
+        portfolio_value = (prices * shares).sum(axis=1)
+
+        # Log evolution: ln(V_t / V0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_evolution = np.log(portfolio_value / initial_value)
+
+        out = pd.DataFrame(
+            {
+                "date": df["date"].values,
+                "portfolio_value": portfolio_value.values,
+                "log_evolution": log_evolution.values,
+            }
+        )
+
+        if out.isna().any().any():
+            print("[portfolio] Warning: NaNs in portfolio output:")
+            print(out.isna().sum())
+
+        # --- Write CSV ---
+        os.makedirs(os.path.dirname(output_csv_path) or ".", exist_ok=True)
+        out.to_csv(output_csv_path, index=False)
+        print(f"[portfolio] Portfolio evolution saved to {output_csv_path}")
+
+        return out
+
 
 def _summarize_parquet_files(root_dir: str) -> pd.DataFrame:
     """Scan root_dir for *_ohlcv.parquet and build a summary table."""
