@@ -71,9 +71,9 @@ ASSETS_CONFIG = {
 }
 
 # 抓取参数
-YEAR = 2024
+YEAR = 2023
 MONTHS = list(range(1, 13))  # 1-12月
-MAX_NEWS_PER_MONTH = 20
+MAX_NEWS_PER_MONTH = 19
 
 # 浏览器设置
 CHROME_OPTIONS = {

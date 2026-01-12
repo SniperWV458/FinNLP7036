@@ -6,7 +6,11 @@
 import time
 import random
 import re
+import os
+import json
 import calendar
+from collections import defaultdict
+from multiprocessing import Pool, Manager, cpu_count
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -26,6 +30,13 @@ from config import (
 class DataFetcher:
     """优化版数据获取器类"""
     
+    SCRAPE_POOL_SIZE = max(2, min(cpu_count(), 8))
+    DOMAIN_REQUEST_GAP = 1.5  # seconds between hits to the same domain
+    LINKS_FILENAME = "links.json"
+    _domain_last_seen = None
+    _domain_lock = None
+    _worker_fetcher = None
+
     def __init__(self, output_base_dir="fetched_data"):
         """
         初始化数据获取器
@@ -84,22 +95,56 @@ class DataFetcher:
         
         return driver
     
-    def get_month_date_range(self, year, month):
-      
+    def _get_search_terms(self, asset_name, asset_config):
+        """
+        获取并去重当前资产使用的搜索词
+        """
+        search_terms = asset_config["search_terms"]
         
+        additional_terms = {
+            "S&P 500": ["S&P500 index", "S&P 500 news", "SPX index", "S&P 500 stock", "Standard & Poor 500"],
+            "NASDAQ Composite": ["NASDAQ news", "NASDAQ market", "IXIC index", "NASDAQ stock", "NASDAQ composite index"],
+            "Dow Jones Industrial Average": ["Dow Jones news", "DJIA index", "Dow 30", "Dow Jones stock", "Dow Jones average"],
+            "CAC 40": ["CAC 40 index", "CAC 40 news", "French stock index", "Paris stock market", "CAC40 index"],
+            "FTSE 100": ["FTSE 100 index", "FTSE 100 news", "UK stock index", "London stock market", "FTSE100"],
+            "EuroStoxx 50": ["Euro Stoxx 50 index", "Euro Stoxx 50 news", "European stock index", "STOXX 50"],
+            "Hang Seng Index": ["Hang Seng index", "HSI news", "Hong Kong stock", "Hong Kong stock index"],
+            "Shanghai Composite": ["Shanghai Composite index", "SSE Composite news", "China stock index", "Shanghai stock"],
+            "BSE Sensex": ["BSE Sensex index", "Sensex news", "India stock index", "Bombay stock exchange"],
+            "Nifty 50": ["Nifty 50 index", "Nifty news", "NSE Nifty index", "India stock market"],
+            "KOSPI": ["KOSPI index", "Korea stock index", "South Korea stock", "Korean stock market"],
+            "Gold": ["gold price today", "gold market", "XAUUSD", "gold spot price", "gold bullion"],
+            "Silver": ["silver price today", "silver market", "XAGUSD", "silver spot price", "silver bullion"],
+            "WTI Crude Oil Futures": ["crude oil price", "oil futures", "WTI price", "West Texas Intermediate", "oil market"]
+        }
+        
+        if asset_name in additional_terms:
+            search_terms = search_terms + additional_terms[asset_name]
+        
+        # 去重并保持顺序
+        return list(dict.fromkeys(search_terms))
     
-    # 当前月份的第一天
+    @staticmethod
+    def extract_domain(url):
+        """
+        提取域名，统一去掉www前缀
+        """
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    
+    def get_month_date_range(self, year, month):
+        """返回某月份的起止日期字符串"""
         start_date = f"{month}/1/{year}"
-    
-    # 计算当前月份的最后一天
+        
         if month == 12:
-        # 12月的最后一天是12月31日
             end_date = f"12/31/{year}"
         else:
-        # 获取当前月份的天数
             month_days = calendar.monthrange(year, month)[1]
             end_date = f"{month}/{month_days}/{year}"
-    
+        
         return start_date, end_date
     
     def construct_google_news_url(self, search_term, start_date, end_date, num_results=100):
@@ -446,127 +491,214 @@ class DataFetcher:
             print(f"获取网页内容失败 {url}: {e}")
             return self.fetch_with_selenium(url)
     
-    def fetch_asset_month_data(self, asset_name, asset_config, year, month, max_news=20):
+    def save_month_links(self, asset_name, year, month, link_tasks):
         """
-        优化版：获取指定资产和月份的数据
+        将当前月份收集到的新闻链接保存为JSON
+        """
+        if not link_tasks:
+            return
+        
+        asset_safe_name = asset_name.replace('/', '_').replace(' ', '_')
+        asset_dir = os.path.join(self.output_base_dir, asset_safe_name)
+        month_dir = os.path.join(asset_dir, f"{year}_{month:02d}")
+        os.makedirs(month_dir, exist_ok=True)
+        
+        payload = {
+            "asset_name": asset_name,
+            "year": year,
+            "month": month,
+            "collected_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "link_count": len(link_tasks),
+            "links": [
+                {
+                    "url": task["url"],
+                    "search_term": task.get("search_term", ""),
+                    "domain": self.extract_domain(task["url"])
+                }
+                for task in link_tasks
+            ]
+        }
+        
+        links_file = os.path.join(month_dir, self.LINKS_FILENAME)
+        with open(links_file, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        
+        print(f"已保存 {len(link_tasks)} 条链接到: {links_file}")
+    
+    def collect_asset_month_links(self, asset_name, asset_config, year, month, max_news=20):
+        """
+        仅收集指定资产、月份的新闻链接，并持久化到本地
         """
         print(f"\n{'='*60}")
-        print(f"获取 {asset_name} - {year}年{month}月 数据")
+        print(f"获取 {asset_name} - {year}年{month}月 链接列表")
         print(f"{'='*60}")
         
-        # 初始化driver
         if not self.driver:
             self.driver = self.setup_driver(headless=CHROME_OPTIONS["headless"])
         
-        # 获取日期范围
         start_date, end_date = self.get_month_date_range(year, month)
         print(f"日期范围: {start_date} 到 {end_date}")
         
-        # 尝试不同的搜索词
-        search_terms = asset_config["search_terms"]
-        
-        # 为某些资产添加额外的搜索词
-        additional_terms = {
-            "S&P 500": ["S&P500 index", "S&P 500 news", "SPX index", "S&P 500 stock", "Standard & Poor 500"],
-            "NASDAQ Composite": ["NASDAQ news", "NASDAQ market", "IXIC index", "NASDAQ stock", "NASDAQ composite index"],
-            "Dow Jones Industrial Average": ["Dow Jones news", "DJIA index", "Dow 30", "Dow Jones stock", "Dow Jones average"],
-            "CAC 40": ["CAC 40 index", "CAC 40 news", "French stock index", "Paris stock market", "CAC40 index"],
-            "FTSE 100": ["FTSE 100 index", "FTSE 100 news", "UK stock index", "London stock market", "FTSE100"],
-            "EuroStoxx 50": ["Euro Stoxx 50 index", "Euro Stoxx 50 news", "European stock index", "STOXX 50"],
-            "Hang Seng Index": ["Hang Seng index", "HSI news", "Hong Kong stock", "Hong Kong stock index"],
-            "Shanghai Composite": ["Shanghai Composite index", "SSE Composite news", "China stock index", "Shanghai stock"],
-            "BSE Sensex": ["BSE Sensex index", "Sensex news", "India stock index", "Bombay stock exchange"],
-            "Nifty 50": ["Nifty 50 index", "Nifty news", "NSE Nifty index", "India stock market"],
-            "KOSPI": ["KOSPI index", "Korea stock index", "South Korea stock", "Korean stock market"],
-            "Gold": ["gold price today", "gold market", "XAUUSD", "gold spot price", "gold bullion"],
-            "Silver": ["silver price today", "silver market", "XAGUSD", "silver spot price", "silver bullion"],
-            "WTI Crude Oil Futures": ["crude oil price", "oil futures", "WTI price", "West Texas Intermediate", "oil market"]
-        }
-        
-        if asset_name in additional_terms:
-            search_terms = search_terms + additional_terms[asset_name]
-        
-        # 去重
-        search_terms = list(dict.fromkeys(search_terms))
-        
-        news_links = []
-        used_search_term = ""
+        search_terms = self._get_search_terms(asset_name, asset_config)
+        link_tasks = []
+        seen_links = set()
         
         for search_term in search_terms:
-            if len(news_links) >= max_news:
+            if len(link_tasks) >= max_news:
                 break
-                
-            print(f"\n尝试搜索词: {search_term}")
-            used_search_term = search_term
             
-            # 构建搜索URL
+            print(f"\n尝试搜索词: {search_term}")
             search_url = self.construct_google_news_url(search_term, start_date, end_date)
             print(f"搜索URL: {search_url[:100]}...")
-            
-            # 获取新闻链接
             print(f"尝试获取最多{max_news}条新闻链接...")
+            
             month_links = self.fetch_news_links(self.driver, search_url, max_news)
             
             if month_links:
-                # 合并但不重复
                 for link in month_links:
-                    if link not in news_links and len(news_links) < max_news:
-                        news_links.append(link)
+                    if link in seen_links or len(link_tasks) >= max_news:
+                        continue
+                    seen_links.add(link)
+                    link_tasks.append({
+                        "asset_name": asset_name,
+                        "category": asset_config["category"],
+                        "year": year,
+                        "month": month,
+                        "search_term": search_term,
+                        "url": link
+                    })
                 
-                print(f"当前找到 {len(news_links)} 个链接")
-                
-                if len(news_links) >= max_news:
+                print(f"当前累计链接: {len(link_tasks)}")
+                if len(link_tasks) >= max_news:
                     break
             else:
                 print("未找到链接，尝试下一个搜索词...")
             
-            # 搜索词之间延迟
             time.sleep(random.uniform(3, 5))
         
-        if not news_links:
+        if not link_tasks:
             print(f"{asset_name} - {year}年{month}月未找到任何新闻链接")
             return []
         
-        print(f"\n找到的链接列表 ({len(news_links)}个):")
-        for i, link in enumerate(news_links[:5], 1):
-            print(f"{i:2d}. {link[:100]}...")
-        if len(news_links) > 5:
-            print(f"... 和另外 {len(news_links)-5} 个链接")
+        print(f"\n找到的链接列表 ({len(link_tasks)}个):")
+        for i, task in enumerate(link_tasks[:5], 1):
+            print(f"{i:2d}. {task['url'][:100]}...")
+        if len(link_tasks) > 5:
+            print(f"... 和另外 {len(link_tasks)-5} 个链接")
         
-        # 抓取并保存网页内容
-        print(f"\n开始抓取{len(news_links)}个新闻页面...")
+        self.save_month_links(asset_name, year, month, link_tasks)
+        return link_tasks
+    
+    def scrape_links_in_parallel(self, link_tasks, processes=None):
+        """
+        使用多进程抓取新闻页面，避免同域请求过于频繁
+        """
+        if not link_tasks:
+            return []
         
-        raw_data_list = []
+        worker_count = processes or self.SCRAPE_POOL_SIZE
+        print(f"\n开始并行抓取 {len(link_tasks)} 个新闻页面 (进程数: {worker_count})...")
+
+        # 按域名分散任务，避免连续命中同一网站
+        domain_buckets = defaultdict(list)
+        for task in link_tasks:
+            domain = self.extract_domain(task["url"])
+            task["__domain"] = domain
+            domain_buckets[domain].append(task)
         
-        for i, link in enumerate(news_links, 1):
-            print(f"\n[{i}/{len(news_links)}] 获取: {link[:80]}...")
+        spread_tasks = []
+        # round-robin 不同域名，降低同域连续请求概率
+        while any(domain_buckets.values()):
+            for domain, bucket in list(domain_buckets.items()):
+                if bucket:
+                    spread_tasks.append(bucket.pop(0))
+                if not bucket:
+                    domain_buckets.pop(domain, None)
+        
+        print(f"已按域名分散任务，涉及 {len(set(t['__domain'] for t in spread_tasks))} 个域名")
+        
+        with Manager() as manager:
+            last_seen = manager.dict()
+            lock = manager.Lock()
             
-            # 智能延迟
-            if i > 1:
-                delay = random.uniform(*DELAY_BETWEEN_REQUESTS)
-                time.sleep(delay)
-            
-            # 获取网页内容
-            html_content = self.fetch_webpage_content(link)
-            
-            if html_content:
-                # 创建原始数据对象
-                raw_data = {
-                    'asset_name': asset_name,
-                    'category': asset_config["category"],
-                    'year': year,
-                    'month': month,
-                    'search_term': used_search_term,
-                    'url': link,
-                    'html_content': html_content,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'content_length': len(html_content)
-                }
-                
-                raw_data_list.append(raw_data)
-                print(f"   成功! ({len(html_content)} 字符)")
-            else:
-                print(f"   获取网页内容失败")
+            with Pool(
+                processes=worker_count,
+                initializer=DataFetcher._init_worker,
+                initargs=(last_seen, lock)
+            ) as pool:
+                results = pool.map(DataFetcher._scrape_link_task, spread_tasks)
+        
+        cleaned_results = [r for r in results if r]
+        print(f"并行抓取完成，成功 {len(cleaned_results)}/{len(link_tasks)}")
+        return cleaned_results
+    
+    @classmethod
+    def _init_worker(cls, shared_last_seen, shared_lock):
+        cls._domain_last_seen = shared_last_seen
+        cls._domain_lock = shared_lock
+        cls._worker_fetcher = None
+    
+    @classmethod
+    def _rate_limit_domain(cls, domain):
+        """简单的同域间隔控制"""
+        wait = 0
+        if cls._domain_last_seen is None or cls._domain_lock is None:
+            return wait
+        
+        with cls._domain_lock:
+            last_time = cls._domain_last_seen.get(domain, 0)
+            now = time.time()
+            wait = max(0, cls.DOMAIN_REQUEST_GAP - (now - last_time))
+            cls._domain_last_seen[domain] = now + wait
+        
+        if wait > 0:
+            time.sleep(wait)
+        return wait
+    
+    @classmethod
+    def _scrape_link_task(cls, task):
+        """
+        进程池中的实际抓取任务，返回带HTML内容的raw_data结构
+        """
+        url = task["url"]
+        domain = cls.extract_domain(url)
+        cls._rate_limit_domain(domain)
+        
+        if cls._worker_fetcher is None:
+            cls._worker_fetcher = DataFetcher()
+        
+        html_content = cls._worker_fetcher.fetch_webpage_content(url, timeout=REQUEST_TIMEOUT)
+        
+        if not html_content:
+            return None
+        
+        return {
+            'asset_name': task["asset_name"],
+            'category': task.get("category", ""),
+            'year': task["year"],
+            'month': task["month"],
+            'search_term': task.get("search_term", ""),
+            'url': url,
+            'html_content': html_content,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'content_length': len(html_content)
+        }
+    
+    def fetch_asset_month_data(self, asset_name, asset_config, year, month, max_news=20):
+        """
+        优化版：获取指定资产和月份的数据
+        """
+        link_tasks = self.collect_asset_month_links(
+            asset_name, asset_config, year, month, max_news
+        )
+        
+        if not link_tasks:
+            return []
+        
+        raw_data_list = self.scrape_links_in_parallel(
+            link_tasks,
+            processes=min(4, self.SCRAPE_POOL_SIZE)
+        )
         
         return raw_data_list
     
@@ -623,37 +755,28 @@ class DataFetcher:
         print(f"每月每资产目标新闻数: {max_news_per_month}")
         print("=" * 60)
         
-        all_raw_data = []
+        all_link_tasks = []
         total_assets = len(ASSETS_CONFIG)
         
         try:
-            # 初始化driver
             self.driver = self.setup_driver(headless=CHROME_OPTIONS["headless"])
             
-            # 按资产处理
             for asset_idx, (asset_name, asset_config) in enumerate(ASSETS_CONFIG.items(), 1):
                 print(f"\n{'='*60}")
                 print(f"处理资产 {asset_idx}/{total_assets}: {asset_name}")
                 print(f"{'='*60}")
                 
-                asset_raw_data = []
-                
-                # 按月份处理
                 for month_idx, month in enumerate(months, 1):
                     print(f"\n处理月份 {month_idx}/{len(months)}")
                     
                     try:
-                        # 获取当前资产和月份的数据
-                        month_raw_data = self.fetch_asset_month_data(
+                        month_links = self.collect_asset_month_links(
                             asset_name, asset_config, year, month, max_news_per_month
                         )
                         
-                        if month_raw_data:
-                            asset_raw_data.extend(month_raw_data)
-                            # 保存原始数据
-                            self.save_raw_data(month_raw_data, asset_name, year, month)
+                        if month_links:
+                            all_link_tasks.extend(month_links)
                         
-                        # 月份之间的延迟
                         if month < months[-1]:
                             delay = random.uniform(*DELAY_BETWEEN_MONTHS)
                             print(f"\n等待 {delay:.1f} 秒后处理下一个月...")
@@ -667,27 +790,36 @@ class DataFetcher:
                         print("等待5秒后继续...")
                         time.sleep(5)
                         continue
-                
-                if asset_raw_data:
-                    all_raw_data.extend(asset_raw_data)
-                
-                # 资产之间的延迟
+            
                 if asset_idx < total_assets:
                     delay = random.uniform(*DELAY_BETWEEN_ASSETS)
                     print(f"\n等待 {delay:.1f} 秒后处理下一个资产...")
                     time.sleep(delay)
             
-            print(f"\n数据获取完成!")
-            print(f"总共获取了 {len(all_raw_data)} 条新闻的原始数据")
-            
-            return all_raw_data
-            
         finally:
-            # 关闭driver
             if self.driver:
                 print("\n关闭浏览器...")
                 self.driver.quit()
                 self.driver = None
+        
+        if not all_link_tasks:
+            print("\n未收集到任何新闻链接，流程结束")
+            return []
+        
+        print(f"\n全年链接收集完成，总计 {len(all_link_tasks)} 条，开始多进程抓取...")
+        raw_data_results = self.scrape_links_in_parallel(all_link_tasks)
+        
+        grouped_raw_data = defaultdict(list)
+        for item in raw_data_results:
+            grouped_raw_data[(item['asset_name'], item['year'], item['month'])].append(item)
+        
+        for (asset_name, year_val, month_val), group in grouped_raw_data.items():
+            self.save_raw_data(group, asset_name, year_val, month_val)
+        
+        print(f"\n数据获取完成!")
+        print(f"总共获取了 {len(raw_data_results)} 条新闻的原始数据")
+        
+        return raw_data_results
     
     def close(self):
         """关闭资源"""

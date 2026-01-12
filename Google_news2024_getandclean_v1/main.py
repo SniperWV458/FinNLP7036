@@ -18,7 +18,7 @@ import pandas as pd
 
 from config import (
     ASSETS_CONFIG, YEAR, MONTHS, MAX_NEWS_PER_MONTH,
-    OUTPUT_BASE_DIR
+    OUTPUT_BASE_DIR, CHROME_OPTIONS
 )
 from data_fetcher import DataFetcher
 from data_cleaner import DataCleaner
@@ -234,7 +234,7 @@ def run_fetch_and_clean(fetched_dir, cleaned_dir):
 def run_test_mode(fetched_dir, cleaned_dir):
     """测试模式 - 处理单个资产"""
     print("\n" + "="*60)
-    print("测试模式: 处理单个资产")
+    print("测试模式: 处理单个资产全年数据")
     print("="*60)
     
     # 显示资产列表
@@ -256,58 +256,91 @@ def run_test_mode(fetched_dir, cleaned_dir):
     
     asset_config = ASSETS_CONFIG[asset_name]
     
-    # 测试月份
-    test_month = 1
-    test_max_news = 20
+    # 全年配置
+    test_months = MONTHS
+    test_max_news = MAX_NEWS_PER_MONTH
     
     print(f"\n测试配置:")
     print(f"  资产: {asset_name}")
-    print(f"  月份: 2024年{test_month}月")
-    print(f"  最大新闻数: {test_max_news}")
+    print(f"  年份: {YEAR}")
+    print(f"  月份: {test_months}")
+    print(f"  每月最大新闻数: {test_max_news}")
     
-    # 阶段1: 获取测试数据
+    # 阶段1: 获取全年测试数据
     print("\n" + "-"*40)
-    print("获取测试数据...")
+    print("获取全年测试数据...")
     
     fetcher = DataFetcher(output_base_dir=fetched_dir)
+    total_raw = 0
+    all_link_tasks = []
     
     try:
-        raw_data = fetcher.fetch_asset_month_data(
-            asset_name, asset_config, YEAR, test_month, test_max_news
-        )
-        
-        if raw_data:
-            fetcher.save_raw_data(raw_data, asset_name, YEAR, test_month)
-            print(f"获取了 {len(raw_data)} 条测试数据")
-        else:
-            print("未能获取测试数据")
-            return
-        
+        # 先收集全年链接（存储links.json），避免逐月立即抓取页面
+        fetcher.driver = fetcher.setup_driver(headless=CHROME_OPTIONS["headless"])
+        for month in test_months:
+            print(f"\n获取 {YEAR}年{month}月 链接...")
+            month_links = fetcher.collect_asset_month_links(
+                asset_name, asset_config, YEAR, month, max_news=test_max_news
+            )
+            if month_links:
+                all_link_tasks.extend(month_links)
+                print(f"累计链接: {len(all_link_tasks)}")
+            else:
+                print(f"{YEAR}年{month}月 未找到链接")
+                time.sleep(1)
+
     finally:
         fetcher.close()
     
-    # 阶段2: 清洗测试数据
+    if not all_link_tasks:
+        print("全年未获取到任何链接，测试结束")
+        return
+    
+    print(f"\n全年共收集 {len(all_link_tasks)} 条链接，开始多进程抓取页面...")
+    raw_data_results = fetcher.scrape_links_in_parallel(all_link_tasks)
+    total_raw = len(raw_data_results)
+
+    # 按月分组保存原始数据
+    grouped_raw = {}
+    for item in raw_data_results:
+        key = (item["asset_name"], item["year"], item["month"])
+        grouped_raw.setdefault(key, []).append(item)
+    for (asset, year_val, month_val), group in grouped_raw.items():
+        fetcher.save_raw_data(group, asset, year_val, month_val)
+
+    if total_raw == 0:
+        print("多进程抓取未获取到页面，测试结束")
+        return
+
+    # 阶段2: 清洗全年测试数据
     print("\n" + "-"*40)
-    print("清洗测试数据...")
+    print("清洗全年测试数据...")
     
     cleaner = DataCleaner(
         input_base_dir=fetched_dir,
         output_base_dir=cleaned_dir
     )
     
+    total_cleaned = 0
     try:
-        cleaned_data = cleaner.clean_asset_month_data(asset_name, YEAR, test_month)
-        
-        if cleaned_data:
-            cleaner.save_cleaned_data(cleaned_data, asset_name, YEAR, test_month)
-            print(f"清洗了 {len(cleaned_data)} 条测试数据")
-        else:
-            print("未能清洗测试数据")
+        for month in test_months:
+            print(f"\n清洗 {YEAR}年{month}月 数据...")
+            cleaned_data = cleaner.clean_asset_month_data(asset_name, YEAR, month)
+            
+            if cleaned_data:
+                cleaner.save_cleaned_data(cleaned_data, asset_name, YEAR, month)
+                total_cleaned += len(cleaned_data)
+                print(f"清洗了 {len(cleaned_data)} 条数据 (累计 {total_cleaned})")
+            else:
+                print(f"{YEAR}年{month}月 未清洗到数据")
     
     except Exception as e:
         print(f"清洗过程中出错: {e}")
         import traceback
         traceback.print_exc()
+    
+    print("\n测试模式完成")
+    print(f"全年共获取 {total_raw} 条，清洗 {total_cleaned} 条")
 
 def create_requirements_file():
     """创建requirements.txt文件"""
