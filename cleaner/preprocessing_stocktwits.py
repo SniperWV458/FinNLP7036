@@ -256,11 +256,17 @@ def main():
     # 文件列表
     files_to_process = [
         'COMPQ_Full_2019_2024.csv',
-        'DJI_Full_2019_2024.csv', 
+        'DIA_Full_2019_2024.csv', 
         'GLD_Full_2019_2024.csv',
         'SLV_Full_2019_2024.csv',
         'SPX_Full_2019_2024.csv',
-        'USO_Full_2019_2024.csv'
+        'USO_Full_2019_2024.csv',
+        'COMPQ_Full_2012_2018.csv',
+        'DIA_Full_2012_2018.csv', 
+        'GLD_Full_2012_2018.csv',
+        'SLV_Full_2012_2018.csv',
+        'SPX_Full_2012_2018.csv',
+        'USO_Full_2012_2018.csv'
     ]
     
     # 创建清洗器实例
