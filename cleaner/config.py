@@ -5,7 +5,7 @@ CLEANING_CONFIG = {
     'max_words': 500,                  # 最大词数
     'english_threshold': 0.7,          # 英语内容阈值
     'letter_ratio_threshold': 0.7,     # 字母占比阈值
-    'tag_ratio_threshold': 0.9,        # tag占比阈值（大于90%的数据将被剔除）
+    'tag_ratio_threshold': 0.75,        # tag占比阈值（大于90%的数据将被剔除）
     
     # 文本处理参数
     'allowed_chars': 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 %+..?!$',  # 允许的字符
