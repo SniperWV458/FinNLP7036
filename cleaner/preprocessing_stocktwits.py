@@ -114,6 +114,42 @@ class StockTwitsDataCleaner:
         letter_ratio = letters / total_chars
         return letter_ratio >= self.config['letter_ratio_threshold']
     
+    def calculate_tag_ratio(self, text):
+        """计算tag在文本中的占比"""
+        if pd.isna(text):
+            return 0
+        
+        text_str = str(text)
+        words = text_str.split()
+        
+        if len(words) == 0:
+            return 0
+        
+        # 统计tag数量（$后接非数字内容的词）
+        tag_count = 0
+        for word in words:
+            if re.match(self.config['tag_pattern'], word):
+                tag_count += 1
+        
+        # 计算tag占比
+        tag_ratio = tag_count / len(words)
+        return tag_ratio
+    
+    def remove_high_tag_ratio_texts(self, df, text_column='Text'):
+        """剔除tag占比大于90%的数据"""
+        initial_count = len(df)
+        
+        # 计算每条数据的tag占比
+        tag_ratios = df[text_column].apply(self.calculate_tag_ratio)
+        
+        # 保留tag占比小于等于90%的数据
+        df = df[tag_ratios <= self.config['tag_ratio_threshold']]
+        
+        removed_count = initial_count - len(df)
+        print(f"去除tag占比过高内容: {removed_count} 条")
+        
+        return df
+    
     def truncate_text(self, text):
         """截断文本到500词以内"""
         if pd.isna(text):
@@ -129,7 +165,7 @@ class StockTwitsDataCleaner:
         """格式化输出"""
         if pd.isna(text):
             return text
-        return f"{self.config['output_prefix']} {{{text}}}"
+        return f"{self.config['output_prefix']} {text}"
     
     def remove_duplicates(self, df, text_column='Text'):
         """去重"""
@@ -179,10 +215,13 @@ class StockTwitsDataCleaner:
         removed_count = initial_count - len(df)
         print(f"去除字母占比不足内容: {removed_count} 条")
         
-        # 10. 截断到500词
+        # 10. 剔除tag占比大于90%的数据
+        df = self.remove_high_tag_ratio_texts(df, text_column)
+        
+        # 11. 截断到500词
         df[text_column] = df[text_column].apply(self.truncate_text)
         
-        # 11. 格式化输出
+        # 12. 格式化输出
         df[text_column] = df[text_column].apply(self.format_output)
         
         print(f"清洗完成，剩余数据: {len(df)} 条")
@@ -205,10 +244,8 @@ class StockTwitsDataCleaner:
         
         # 保存结果 - 保留所有原始列
         try:
-            # 保留所有原始列，包括Year, Month, Time, ID等
             cleaned_df.to_csv(output_file, index=False, encoding=self.config['encoding'])
             print(f"结果已保存至: {output_file}")
-            print(f"输出文件包含列: {list(cleaned_df.columns)}")
             return True
         except Exception as e:
             print(f"保存文件失败: {e}")
