@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import re
 import unicodedata
@@ -246,11 +247,12 @@ class StockTwitsDataCleaner:
             return truncated
         return text
     
-    def format_output(self, text):
+    def format_output(self, text, output_prefix=None):
         """格式化输出"""
         if pd.isna(text):
             return text
-        return f"{self.config['output_prefix']} {text}"
+        prefix = output_prefix or self.config['output_prefix']
+        return f"{prefix} {text}"
     
     def remove_duplicates(self, df, text_column='Text', asset_name=''):
         """去重"""
@@ -326,7 +328,7 @@ class StockTwitsDataCleaner:
             # 包含数字的条目数
             stats['number_count_after'] = df[text_column].apply(self.count_numbers_in_text).sum()
     
-    def clean_data(self, df, text_column='Text', asset_name=''):
+    def clean_data(self, df, text_column='Text', asset_name='', output_prefix=None):
         """执行完整的数据清洗流程"""
         if df is None:
             return None
@@ -379,7 +381,9 @@ class StockTwitsDataCleaner:
         df[text_column] = df[text_column].apply(lambda x: self.truncate_text(x, asset_name))
         
         # 12. 格式化输出
-        df[text_column] = df[text_column].apply(self.format_output)
+        df[text_column] = df[text_column].apply(
+            lambda x: self.format_output(x, output_prefix=output_prefix)
+        )
         
         # 收集清洗后统计信息
         self.collect_statistics(df, text_column, asset_name, 'after')
@@ -487,20 +491,33 @@ class StockTwitsDataCleaner:
             print(f"保存统计信息失败: {e}")
             return False
     
-    def process_file(self, input_file, output_file):
+    def process_file(self, input_file, output_file, text_column='Text'):
         """处理单个文件"""
         print(f"\n正在处理文件: {input_file}")
         
         # 从文件名提取资产名称
-        asset_name = input_file.replace('_merged.csv', '')
+        file_name = os.path.basename(input_file)
+        asset_name = os.path.splitext(file_name)[0].replace('_merged', '')
         
         # 加载数据
         df = self.load_data(input_file)
         if df is None:
             return False
+        if text_column not in df.columns:
+            print(f"缺少文本列 '{text_column}'，可用列: {list(df.columns)}")
+            return False
         
         # 清洗数据
-        cleaned_df = self.clean_data(df, asset_name=asset_name)
+        normalized_path = os.path.normpath(input_file).lower()
+        news_marker = os.path.normpath(os.path.join('data', 'news')).lower()
+        news_marker_alt = os.path.normpath(os.path.join('data', 'textual_data', 'news')).lower()
+        output_prefix = '[NEWS]' if (news_marker in normalized_path or news_marker_alt in normalized_path) else None
+        cleaned_df = self.clean_data(
+            df,
+            text_column=text_column,
+            asset_name=asset_name,
+            output_prefix=output_prefix
+        )
         if cleaned_df is None or len(cleaned_df) == 0:
             print("清洗后无有效数据")
             return False
@@ -517,13 +534,24 @@ class StockTwitsDataCleaner:
 def main():
     """主函数"""
     # 文件列表
-    files_to_process = [
+    """files_to_process = [
         'COMPQ_merged.csv',
         'DIA_merged.csv', 
         'GLD_merged.csv',
         'SLV_merged.csv',
         'SPX_merged.csv',
         'USO_merged.csv'
+    ]"""
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    base_dir = os.path.join(repo_root, 'data', 'textual_data', 'news')
+    files_to_process = [
+        'DJI_2017-2024_all.csv',
+        'GOLD_2017-2024_all.csv',
+        'GSPC_2017-2024_all.csv',
+        'IXIC_2017-2024_all.csv',
+        'OIL_2017-2024_all.csv',
+        'SILVER_2017-2024_all.csv',
     ]
     
     # 创建清洗器实例
@@ -532,8 +560,10 @@ def main():
     # 处理每个文件
     success_count = 0
     for input_file in files_to_process:
+        input_path = os.path.join(base_dir, input_file)
         output_file = f"cleaned_{input_file}"
-        if cleaner.process_file(input_file, output_file):
+        output_path = os.path.join(base_dir, output_file)
+        if cleaner.process_file(input_path, output_path, text_column='title'):
             success_count += 1
     
     # 生成统计报告
@@ -549,6 +579,7 @@ def main():
     cleaner.save_statistics_to_csv('cleaning_statistics_summary.csv')
     
     print(f"\n处理完成！成功处理 {success_count}/{len(files_to_process)} 个文件")
+
 
 if __name__ == "__main__":
     main()

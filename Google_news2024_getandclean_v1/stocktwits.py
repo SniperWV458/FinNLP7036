@@ -21,9 +21,10 @@ def scrape_historical_multiyear(ticker):
 
     results = []
     # Starting slightly higher to ensure 2024-12 is captured
-    current_max_id = 598000000 
+    # current_max_id = 598000000
+    current_max_id = 152207798
     
-    target_years = range(2024, 2008, -1)
+    target_years = range(2018, 2011, -1)
     target_months = range(12, 0, -1)
 
     print(f"Starting Mega-Scrape: {ticker} (2009-2024) - Timeout Enhanced")
@@ -32,10 +33,13 @@ def scrape_historical_multiyear(ticker):
         for month in target_months:
             found_month = False
             attempts = 0
+            last_seen_id = None
+            stuck_count = 0
             
             while not found_month and attempts < 15:
                 try:
                     # Increased timeout to 30 seconds to avoid curl(28)
+                    print(f"Requesting using url and current_max_id: {url}?%20&max={current_max_id}")
                     r = requests.get(url, params={"max": current_max_id}, headers=headers, impersonate="chrome110", timeout=30)
                     
                     if r.status_code == 200:
@@ -43,6 +47,21 @@ def scrape_historical_multiyear(ticker):
                         if not msgs: 
                             current_max_id += 2000000
                             attempts += 1
+                            continue
+                        
+                        top_id = msgs[0]['id']
+                        if top_id == last_seen_id:
+                            stuck_count += 1
+                        else:
+                            stuck_count = 0
+                        last_seen_id = top_id
+
+                        # When we keep getting the same page, force a bigger backward jump
+                        if stuck_count >= 4:
+                            current_max_id -= 2500000
+                            print(f"Detected oscillation at id {top_id}, forcing jump to {current_max_id}")
+                            attempts += 1
+                            time.sleep(1.5)
                             continue
                         
                         ts = datetime.strptime(msgs[0]['created_at'], '%Y-%m-%dT%H:%M:%SZ')
@@ -58,6 +77,7 @@ def scrape_historical_multiyear(ticker):
                             temp_id = msgs[-1]['id']
                             for _ in range(3):
                                 # Sub-requests also use 30s timeout
+                                print(f"Requesting using url and temp_id: {url}?%20&max={temp_id}")
                                 nr = requests.get(url, params={"max": temp_id}, headers=headers, impersonate="chrome110", timeout=30)
                                 if nr.status_code == 200:
                                     n_msgs = nr.json().get('messages', [])
@@ -102,4 +122,4 @@ def scrape_historical_multiyear(ticker):
         pd.DataFrame(results).to_csv(final_path, index=False, encoding='utf-8-sig')
         print(f"Final Success! File: {final_path}")
 
-scrape_historical_multiyear("AAPL")
+scrape_historical_multiyear("USO")

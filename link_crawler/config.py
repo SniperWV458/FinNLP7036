@@ -73,3 +73,14 @@ CRAWLER_CONFIG = {
         'http://www.nasdaq.com/article/': 'https://www.nasdaq.com/articles/',
     }
 }
+
+# Luna Proxy配置
+LUNA_PROXY_CONFIG = {
+    'enabled': True,  # 设置为True启用代理，False禁用
+    'username': 'user-yklcsczkthf1-region-us',
+    'password': 'yHnq6bgNUEigl',
+    'server': 'pr-new.lunaproxy.com:32233',
+    'max_retries_per_worker': 3,
+    'use_multiprocessing': True,  # 使用多进程而非多线程
+    'pool_size': 5,  # 进程池大小
+}

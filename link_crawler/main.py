@@ -7,6 +7,7 @@ from crawler import NewsCrawler
 from cleaner import TextCleaner
 import argparse
 import warnings
+import multiprocessing as mp
 warnings.filterwarnings('ignore')
 
 def validate_data_file(file_path):
@@ -27,8 +28,18 @@ def validate_data_file(file_path):
         print(f"错误: 无法读取文件 {file_path} - {e}")
         return False
 
-def process_single_file(input_file, output_dir='data', sample_size=None, use_threading=True):
-    """处理单个文件"""
+def process_single_file(input_file, output_dir='data', sample_size=None, use_threading=True, 
+                        use_multiprocessing=None, use_proxy=None):
+    """
+    处理单个文件
+    Args:
+        input_file: 输入文件路径
+        output_dir: 输出目录
+        sample_size: 样本大小
+        use_threading: 是否使用多线程
+        use_multiprocessing: None (使用配置), True (强制多进程), False (使用线程)
+        use_proxy: None (使用配置), True (强制使用代理), False (不使用代理)
+    """
     print(f"\n{'='*60}")
     print(f"开始处理文件: {input_file}")
     print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -80,12 +91,13 @@ def process_single_file(input_file, output_dir='data', sample_size=None, use_thr
     print("步骤1: 开始爬取网页内容")
     print("-"*60)
     
-    crawler = NewsCrawler()
+    crawler = NewsCrawler(use_proxy=use_proxy)
     raw_df = crawler.process_batch(
         df, 
         output_file=raw_output, 
         sample_size=sample_size,
-        use_threading=use_threading
+        use_threading=use_threading,
+        use_multiprocessing=use_multiprocessing
     )
     
     if raw_df is None or raw_df.empty:
@@ -177,15 +189,35 @@ def generate_stats_report(cleaned_df, raw_df, stats_file):
     print(f"\n详细统计已保存至: {stats_file}")
 
 def main():
-    parser = argparse.ArgumentParser(description='新闻数据爬取和清洗工具')
+    parser = argparse.ArgumentParser(description='新闻数据爬取和清洗工具 (支持Luna代理IP轮换)')
     parser.add_argument('--files', nargs='+', help='要处理的CSV文件列表')
     parser.add_argument('--input-dir', default='.', help='输入目录')
     parser.add_argument('--output-dir', default='data', help='输出目录')
     parser.add_argument('--sample', type=int, help='样本大小（测试用）')
     parser.add_argument('--no-threading', action='store_true', help='禁用多线程')
+    parser.add_argument('--multiprocessing', action='store_true', help='启用多进程模式（推荐用于代理）')
+    parser.add_argument('--no-multiprocessing', action='store_true', help='禁用多进程模式')
+    parser.add_argument('--proxy', action='store_true', help='强制启用Luna代理')
+    parser.add_argument('--no-proxy', action='store_true', help='强制禁用代理')
     parser.add_argument('--config', help='配置文件路径')
     
     args = parser.parse_args()
+    
+    # 确定多进程模式
+    if args.multiprocessing:
+        use_multiprocessing = True
+    elif args.no_multiprocessing:
+        use_multiprocessing = False
+    else:
+        use_multiprocessing = None  # 使用配置文件设置
+    
+    # 确定代理模式
+    if args.proxy:
+        use_proxy = True
+    elif args.no_proxy:
+        use_proxy = False
+    else:
+        use_proxy = None  # 使用配置文件设置
     
     # 确定要处理的文件
     if args.files:
@@ -210,6 +242,8 @@ def main():
         return
     
     print(f"找到 {len(files_to_process)} 个文件需要处理")
+    print(f"多进程模式: {use_multiprocessing if use_multiprocessing is not None else '使用配置文件设置'}")
+    print(f"代理模式: {use_proxy if use_proxy is not None else '使用配置文件设置'}")
     
     # 处理每个文件
     all_results = []
@@ -221,7 +255,9 @@ def main():
             file_path, 
             args.output_dir,
             sample_size=args.sample,
-            use_threading=not args.no_threading
+            use_threading=not args.no_threading,
+            use_multiprocessing=use_multiprocessing,
+            use_proxy=use_proxy
         )
         
         if result is not None:
@@ -245,4 +281,6 @@ def main():
         print(f"总体统计已保存至: {total_stats}")
 
 if __name__ == "__main__":
+    # Windows多进程支持需要这个保护
+    mp.freeze_support()
     main()
