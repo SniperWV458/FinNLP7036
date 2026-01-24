@@ -13,13 +13,27 @@ from stable_baselines3.common.evaluation import evaluate_policy
 
 # --- Configuration ---
 TICKERS = ["^GSPC", "^IXIC", "^DJI", "GC=F", "SI=F", "CL=F"]
-START_DATE = "2012-01-01"
-END_DATE = "2024-12-31"
 
-TRAIN_START = "2012-01-01"
-TRAIN_END = "2019-12-31"
-BACKTEST_START = "2020-01-01"
-BACKTEST_END = "2024-11-01"
+# ============================================================================
+# CRITICAL: Train/Test Split Configuration
+# ============================================================================
+# Price Metrics Agent Configuration (longer history available)
+METRICS_START_DATE = "2003-01-01"
+METRICS_TRAIN_START = "2003-01-01"
+METRICS_TRAIN_END = "2022-12-31"
+METRICS_BACKTEST_START = "2003-01-01"
+METRICS_BACKTEST_END = "2024-11-01"
+
+# NLP Agent Configuration (limited by NLP data availability)
+NLP_START_DATE = "2012-01-01"
+NLP_TRAIN_START = "2012-01-01"
+NLP_TRAIN_END = "2022-12-31"
+NLP_BACKTEST_START = "2012-01-01"
+NLP_BACKTEST_END = "2024-11-01"
+
+# Common Configuration
+END_DATE = "2024-12-31"
+# ============================================================================
 
 SEEDS = [1, 2, 3, 4, 5]
 TOTAL_TIMESTEPS = 10000
@@ -30,27 +44,46 @@ EXPECTED_OBS_SIZE = 57
 
 # --- Step 1: Download and Clean Price Data ---
 def fetch_data(tickers, start, end):
-    """Fetch data with rate limit handling (matching alpha.py)"""
-    retry = True
-    delay = 60
-    data = None
-    while retry:
-        try:
-            data = yf.download(tickers, start=start, end=end, actions=False)
-            if len(tickers) > 1:
-                data = data['Close']
-            else:
-                data = data[['Close']]
-            retry = False
-        except Exception as e:
-            if "429" in str(e):
-                print(f"Rate limit hit. Retrying after {delay} seconds...")
-                time.sleep(delay)
-            else:
-                print(f"Error fetching data: {e}")
+    """Fetch data with rate limit handling and range splitting."""
+    def fetch_range(range_start, range_end):
+        retry = True
+        delay = 60
+        data = None
+        while retry:
+            try:
+                data = yf.download(tickers, start=range_start, end=range_end, actions=False)
+                if len(tickers) > 1:
+                    data = data['Close']
+                else:
+                    data = data[['Close']]
                 retry = False
-                data = pd.DataFrame()
-    return data
+            except Exception as e:
+                if "429" in str(e):
+                    print(f"Rate limit hit. Retrying after {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    print(f"Error fetching data: {e}")
+                    retry = False
+                    data = pd.DataFrame()
+        return data
+
+    split_date = pd.Timestamp("2012-01-01")
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+
+    if start_ts < split_date and end_ts > split_date:
+        print("Large date range detected. Downloading in two segments...")
+        data_before = fetch_range(start_ts, split_date)
+        data_after = fetch_range(split_date, end_ts)
+        if data_before.empty:
+            return data_after
+        if data_after.empty:
+            return data_before
+        combined = pd.concat([data_before, data_after]).sort_index()
+        combined = combined[~combined.index.duplicated(keep="first")]
+        return combined
+
+    return fetch_range(start_ts, end_ts)
 
 
 def clean_stock_data(df):
@@ -212,7 +245,7 @@ class CustomPortfolioEnv(gym.Env):
         
         # Load monthly observations
         self.metrics_dir = metrics_dir
-        months = pd.date_range(start=TRAIN_START, end=TRAIN_END, freq="ME")
+        months = pd.date_range(start=METRICS_TRAIN_START, end=METRICS_TRAIN_END, freq="ME")
         self.observations = []
         self.month_files = []
         
@@ -239,7 +272,7 @@ class CustomPortfolioEnv(gym.Env):
         # Get monthly last trading days
         self.monthly_last_days = self.daily_prices.resample("ME").last().index.tolist()
         self.monthly_last_days = [d for d in self.monthly_last_days
-                                if d >= pd.Timestamp(TRAIN_START) and d <= pd.Timestamp(END_DATE)]
+                                if d >= pd.Timestamp(METRICS_TRAIN_START) and d <= pd.Timestamp(END_DATE)]
         
         # Align observations with price data
         self.total_steps = min(len(self.observations), len(self.monthly_last_days) - 1)
@@ -339,7 +372,7 @@ class CustomPortfolioEnvBacktest(gym.Env):
         self.daily_prices = pd.read_csv(price_file, index_col="Date", parse_dates=True)
         
         # Load monthly observations into a dictionary
-        months = pd.date_range(start=TRAIN_START, end=END_DATE, freq="ME")
+        months = pd.date_range(start=METRICS_TRAIN_START, end=END_DATE, freq="ME")
         self.observations = {}
         
         for month in months:
@@ -359,7 +392,7 @@ class CustomPortfolioEnvBacktest(gym.Env):
         self.month_list = [d.strftime("%Y-%m") for d in self.monthly_last_days]
         
         # Define backtest period
-        self.backtest_months = pd.date_range(start=BACKTEST_START, end=BACKTEST_END, freq="ME").strftime("%Y-%m").tolist()
+        self.backtest_months = pd.date_range(start=METRICS_BACKTEST_START, end=METRICS_BACKTEST_END, freq="ME").strftime("%Y-%m").tolist()
         for month in self.backtest_months:
             if month not in self.observations:
                 raise ValueError(f"Observation file for {month} not found.")
@@ -610,7 +643,7 @@ class CustomPortfolioEnvNLP(gym.Env):
         self.daily_prices = pd.read_csv(price_file, index_col="Date", parse_dates=True)
         
         # Load NLP observation vectors (6 sentiment scores for 6 assets)
-        months = pd.date_range(start=TRAIN_START, end=TRAIN_END, freq="ME")
+        months = pd.date_range(start=NLP_TRAIN_START, end=NLP_TRAIN_END, freq="ME")
         self.observations = []
         self.obs_months = []
         
@@ -708,7 +741,7 @@ class CustomPortfolioEnvNLPBacktest(gym.Env):
         self.daily_prices = pd.read_csv(price_file, index_col="Date", parse_dates=True)
         
         # Load NLP observations into a dictionary
-        months = pd.date_range(start=TRAIN_START, end=END_DATE, freq="ME")
+        months = pd.date_range(start=NLP_TRAIN_START, end=END_DATE, freq="ME")
         self.observations = {}
         
         for month in months:
@@ -722,9 +755,10 @@ class CustomPortfolioEnvNLPBacktest(gym.Env):
                         print(f"Warning: {file_path} has {len(df)} rows, expected {len(TICKERS)}. Skipping.")
                 except Exception as e:
                     print(f"Error reading {file_path}: {e}")
+
         
         # Define backtest period
-        self.backtest_months = pd.date_range(start=BACKTEST_START, end=BACKTEST_END, freq="ME").strftime("%Y-%m").tolist()
+        self.backtest_months = pd.date_range(start=NLP_BACKTEST_START, end=NLP_BACKTEST_END, freq="ME").strftime("%Y-%m").tolist()
         for month in self.backtest_months:
             if month not in self.observations:
                 print(f"Warning: Observation file for {month} not found. Using zeros.")
@@ -895,12 +929,25 @@ def run_nlp_backtests(price_dir="metrics_used_6assets/price",
 
 # --- Main Pipeline ---
 def main():
-    """Main pipeline matching alpha.py structure (both Metrics and NLP)"""
-    print("=" * 60)
-    print("STEP 1: Downloading price data...")
-    print("=" * 60)
-    data = fetch_data(TICKERS, START_DATE, END_DATE)
+    """
+    Main pipeline for base RL agents (both Metrics and NLP).
     
+    Flow:
+    1. Download and process price data (2003-2024 for metrics, 2012-2024 for NLP)
+    2. Train metrics agents on 2003-2019, NLP agents on 2012-2019
+    3. Backtest metrics agents on 2003-2024, NLP agents on 2012-2024
+       - Training periods: Used for meta-agent training
+       - Backtesting: Used for meta-agent backtesting
+    """
+    print("=" * 60)
+    print("BASE AGENT PIPELINE (METRICS + NLP)")
+    print("METRICS - Train: 2003-2019 | Backtest: 2003-2024")
+    print("NLP - Train: 2012-2019 | Backtest: 2012-2024")
+    print("=" * 60)
+    print("\nSTEP 1: Downloading price data (from 2003-01-01)...")
+    print("=" * 60)
+    data = fetch_data(TICKERS, METRICS_START_DATE, END_DATE)
+    data.to_csv(f"price_cache/fetched_{METRICS_START_DATE}_{END_DATE}.csv")
     if data.empty:
         raise ValueError("No data downloaded. Check tickers or date range.")
     
@@ -917,29 +964,31 @@ def main():
     print("\nSTEP 5: Saving organized data...")
     save_organized_data(clean_df, normalized_df, log_evolution_df, observations)
     
-    """print("\n" + "=" * 60)
-    print("STEP 6: Training METRICS RL agents...")
+    print("\n" + "=" * 60)
+    print("STEP 6: Training METRICS RL agents (2003-2019)...")
     print("=" * 60)
     train_rl_agents()
     
     print("\n" + "=" * 60)
-    print("STEP 7: Running METRICS backtests...")
+    print("STEP 7: Running METRICS backtests (2003-2024)...")
     print("=" * 60)
-    run_backtests()"""
+    run_backtests()
     
     print("\n" + "=" * 60)
-    print("STEP 8: Training NLP RL agents...")
+    print("STEP 8: Training NLP RL agents (2012-2019)...")
     print("=" * 60)
     train_nlp_agents()
     
     print("\n" + "=" * 60)
-    print("STEP 9: Running NLP backtests...")
+    print("STEP 9: Running NLP backtests (2012-2024)...")
     print("=" * 60)
     run_nlp_backtests()
     
     print("\n" + "=" * 60)
     print("Pipeline completed successfully!")
-    print("Both METRICS and NLP agents trained and backtested!")
+    print("METRICS agents trained on 2003-2019, backtested on 2003-2024")
+    print("NLP agents trained on 2012-2019, backtested on 2012-2024")
+    print("Ready for meta-agent training.")
     print("=" * 60)
 
 
