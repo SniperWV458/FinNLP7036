@@ -2,7 +2,6 @@ import os
 import pandas as pd
 from transformers import pipeline
 
-
 NEWS_CLEANED_DIR = os.path.join("data", "textual_data", "news_cleaned")
 STOCKWITS_CLEANED_DIR = os.path.join("data", "textual_data", "stockwits_cleaned_data")
 OUTPUT_BASE_DIR = "sentiment_analysis_cleaned"
@@ -10,7 +9,6 @@ OUTPUT_BASE_DIR = "sentiment_analysis_cleaned"
 # Set True to combine news + stocktwits into a single summary/matrix.
 # Set False to store summaries separately by source.
 COMBINE_SOURCES = True
-
 
 sentiment_pipeline = pipeline("text-classification", model="ProsusAI/finbert")
 
@@ -86,11 +84,11 @@ def build_monthly_summary(df: pd.DataFrame, source_name: str | None = None) -> p
 
 
 def process_source(
-    source_name: str,
-    input_dir: str,
-    text_col: str,
-    year_col: str,
-    month_col: str,
+        source_name: str,
+        input_dir: str,
+        text_col: str,
+        year_col: str,
+        month_col: str,
 ) -> list[pd.DataFrame]:
     output_dir = os.path.join(OUTPUT_BASE_DIR, source_name)
     os.makedirs(output_dir, exist_ok=True)

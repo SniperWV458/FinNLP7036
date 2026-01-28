@@ -531,20 +531,66 @@ class StockTwitsDataCleaner:
             print(f"保存文件失败: {e}")
             return False
 
+def merge_stocktwits_files(base_dir, file_list):
+    """合并同一资产的不同年份CSV，返回合并后的文件名列表"""
+    grouped = defaultdict(list)
+    for file_name in file_list:
+        asset_name = file_name.split('_Full_')[0]
+        grouped[asset_name].append(file_name)
+
+    merged_files = []
+    for asset_name, files in grouped.items():
+        dfs = []
+        for file_name in sorted(files):
+            file_path = os.path.join(base_dir, file_name)
+            try:
+                df = pd.read_csv(file_path)
+                dfs.append(df)
+                print(f"合并读取: {file_name}, 行数: {len(df)}")
+            except Exception as e:
+                print(f"合并读取失败 {file_name}: {e}")
+                continue
+
+        if not dfs:
+            print(f"跳过合并 {asset_name}: 无有效数据")
+            continue
+
+        merged_df = pd.concat(dfs, ignore_index=True)
+        merged_file = f"{asset_name}_Full_2012_2024_merged.csv"
+        merged_path = os.path.join(base_dir, merged_file)
+        try:
+            merged_df.to_csv(merged_path, index=False, encoding=CLEANING_CONFIG['encoding'])
+            print(f"合并完成: {merged_file}, 行数: {len(merged_df)}")
+            merged_files.append(merged_file)
+        except Exception as e:
+            print(f"保存合并文件失败 {merged_file}: {e}")
+
+    return merged_files
+
 def main():
     """主函数"""
+    # StockTwits 数据目录
+    base_dir = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), '..', 'data', 'textual_data', 'news')
+    )
+
     # 文件列表
     """files_to_process = [
-        'COMPQ_merged.csv',
-        'DIA_merged.csv', 
-        'GLD_merged.csv',
-        'SLV_merged.csv',
-        'SPX_merged.csv',
-        'USO_merged.csv'
+        'USO_Full_2012_2018.csv',
+        'SLV_Full_2012_2018.csv',
+        'GLD_Full_2012_2018.csv',
+        'DIA_Full_2012_2018.csv',
+        'COMPQ_Full_2012_2018.csv',
+        'SPX_Full_2012_2018.csv',
+        'DIA_Full_2019_2024.csv',
+        'USO_Full_2019_2024.csv',
+        'SLV_Full_2019_2024.csv',
+        'GLD_Full_2019_2024.csv',
+        'COMPQ_Full_2019_2024.csv',
+        'SPX_Full_2019_2024.csv'
     ]"""
 
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    base_dir = os.path.join(repo_root, 'data', 'textual_data', 'news')
+
     files_to_process = [
         'DJI_2017-2024_all.csv',
         'GOLD_2017-2024_all.csv',
@@ -556,6 +602,9 @@ def main():
     
     # 创建清洗器实例
     cleaner = StockTwitsDataCleaner(CLEANING_CONFIG)
+
+    # 先合并同资产文件，再进行清洗，保证统计一致
+    # files_to_process = merge_stocktwits_files(base_dir, files_to_process)
     
     # 处理每个文件
     success_count = 0
